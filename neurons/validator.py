@@ -1686,6 +1686,47 @@ class Validator:
             tplr.logger.error(f"Failed to create new peer list: {e}")
             return False
 
+    def select_next_peers(self) -> bool:
+        # 1. Define candidate peers
+        non_zero_weight_uids = torch.nonzero(self.weights).flatten().numpy()
+        candidates = list(set(non_zero_weight_uids) - set(self.comms.peers))
+
+        if len(candidates) < self.hparams.peers_to_replace:
+            tplr.logger.info(
+                "Skipping update because there are insufficient candidate UIDs: "
+                f"{len(non_zero_weight_uids)} available and minimum is "
+                f"{self.hparams.peers_to_replace}. There are "
+                f"{len(non_zero_weight_uids)} UIDs with non-zero weight, "
+                f"{len(candidates)} of which are not already in the peer list (these "
+                f"are the candidates)."
+            )
+            return False
+
+        # 2. Pick ingoing and ingoing peers
+        ingoing_peers = np.random.choice(
+            a=candidates,
+            size=self.hparams.peers_to_replace,
+            replace=False,
+        )
+        outgoing_peers = np.random.choice(
+            a=self.comms.peers,
+            size=self.hparams.peers_to_replace,
+            replace=False,
+        )
+
+        # 3. Replace
+        self.comms.peers = np.concatenate(
+            [
+                self.comms.peers[~np.isin(self.comms.peers, outgoing_peers)],
+                ingoing_peers,
+            ]
+        )
+        tplr.logger.info(
+            f"Updated peer list by swapping {outgoing_peers} for "
+            f"{ingoing_peers}. Current peers are {self.comms.peers}."
+        )
+        return True
+
     # Listens for new blocks and sets self.current_block and self.current_window
     def block_listener(self, loop):
         import websockets.exceptions  # Ensure we catch websockets errors
