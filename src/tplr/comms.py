@@ -21,7 +21,6 @@ import re
 import math
 import json
 import time
-import numpy as np
 import torch
 import asyncio
 import aiofiles
@@ -1455,7 +1454,7 @@ class Comms(ChainManager):
         """
         key = f"{PEERS_FILE_PREFIX}{first_effective_window}_v{__version__}.json"
         peers_and_weights = {
-            "peers": self.peers.tolist(),
+            "peers": self.peers,
             "weights": weights.tolist(),
             "initial_selection": initial_selection,
             "sync_window": sync_window,
@@ -1493,81 +1492,77 @@ class Comms(ChainManager):
             if os.path.exists(temp_file):
                 os.remove(temp_file)
 
-    async def get_peer_list(self) -> tuple[int, int] | None:
+    async def get_peer_list(self) -> tuple[list[int], int] | None:
         tplr.logger.info("Starting to look for a peer list on a validator bucket")
-        while True:
-            try:
-                (
-                    validator_bucket,
-                    validator_uid,
-                ) = await self._get_highest_stake_validator_bucket()
-                if validator_bucket is None:
-                    tplr.logger.warning(
-                        "No highest staked validator bucket found. Retrying in 10 seconds."
-                    )
-                    await asyncio.sleep(10)
-                    continue
-
-                tplr.logger.info(
-                    f"Attempting to fetch peer list from UID {validator_uid} bucket {validator_bucket.name}"
+        try:
+            (
+                validator_bucket,
+                validator_uid,
+            ) = await self._get_highest_stake_validator_bucket()
+            if validator_bucket is None:
+                tplr.logger.warning(
+                    "No highest staked validator bucket found. Retrying in 10 seconds."
                 )
+                return None
 
-                session = get_session()
-                async with session.create_client(
-                    "s3",
-                    endpoint_url=self.get_base_url(
-                        BUCKET_SECRETS["gradients"]["account_id"]
-                    ),
-                    region_name=CF_REGION_NAME,
-                    config=client_config,
-                    aws_access_key_id=BUCKET_SECRETS["gradients"]["credentials"][
-                        "write"
-                    ]["access_key_id"],
-                    aws_secret_access_key=BUCKET_SECRETS["gradients"]["credentials"][
-                        "write"
-                    ]["secret_access_key"],
-                ) as s3_client:
-                    list_args = {
-                        "Bucket": BUCKET_SECRETS["gradients"]["name"],
-                        "Prefix": "peers_",
-                    }
-                    response = await s3_client.list_objects_v2(**list_args)
+            tplr.logger.info(
+                f"Attempting to fetch peer list from UID {validator_uid} bucket {validator_bucket.name}"
+            )
 
-                keys = [obj["Key"] for obj in response.get("Contents", [])]
-                if len(keys) == 0:
-                    tplr.logger.info("No peer list file found on bucket")
-                    return None
-                pattern = rf"^{PEERS_FILE_PREFIX}(?P<window>\d+)_v{__version__}\.json$"
-                max_window = -1
-                selected_key = None
-                for key in keys:
-                    match = re.match(pattern, key)
-                    if match:
-                        window = int(match.group("window"))
-                        if window > max_window:
-                            max_window = window
-                            selected_key = key
-                if selected_key is None:
-                    tplr.logger.error(
-                        f"No peer list file matched the regex pattern "
-                        f"{pattern}. First five files are {keys[:5]}"
-                    )
+            session = get_session()
+            async with session.create_client(
+                "s3",
+                endpoint_url=self.get_base_url(
+                    BUCKET_SECRETS["gradients"]["account_id"]
+                ),
+                region_name=CF_REGION_NAME,
+                config=client_config,
+                aws_access_key_id=BUCKET_SECRETS["gradients"]["credentials"]["write"][
+                    "access_key_id"
+                ],
+                aws_secret_access_key=BUCKET_SECRETS["gradients"]["credentials"][
+                    "write"
+                ]["secret_access_key"],
+            ) as s3_client:
+                list_args = {
+                    "Bucket": BUCKET_SECRETS["gradients"]["name"],
+                    "Prefix": "peers_",
+                }
+                response = await s3_client.list_objects_v2(**list_args)
+
+            keys = [obj["Key"] for obj in response.get("Contents", [])]
+            if len(keys) == 0:
+                tplr.logger.info("No peer list file found on bucket")
+                return None
+            pattern = rf"^{PEERS_FILE_PREFIX}(?P<window>\d+)_v{__version__}\.json$"
+            max_window = -1
+            selected_key = None
+            for key in keys:
+                match = re.match(pattern, key)
+                if match:
+                    window = int(match.group("window"))
+                    if window > max_window:
+                        max_window = window
+                        selected_key = key
+            if selected_key is None:
+                tplr.logger.error(
+                    f"No peer list file matched the regex pattern "
+                    f"{pattern}. First five files are {keys[:5]}"
+                )
+            else:
+                # get the file
+                peers_data = await self.s3_get_object(
+                    key=selected_key, bucket=validator_bucket
+                )
+                if isinstance(peers_data, dict):
+                    peers_dict = peers_data
                 else:
-                    # get the file
-                    peers_data = await self.s3_get_object(
-                        key=selected_key, bucket=validator_bucket
-                    )
-                    if isinstance(peers_data, dict):
-                        peers_dict = peers_data
-                    else:
-                        # If it's bytes, decode and load JSON
-                        peers_dict = json.loads(peers_data.decode("utf-8"))
-                    return np.array(peers_dict["peers"]), peers_dict[
-                        "first_effective_window"
-                    ]
-            except Exception as e:
-                tplr.logger.error(f"Error fetching start_window: {e}")
-                await asyncio.sleep(10)
+                    # If it's bytes, decode and load JSON
+                    peers_dict = json.loads(peers_data.decode("utf-8"))
+                return peers_dict["peers"], peers_dict["first_effective_window"]
+        except Exception as e:
+            tplr.logger.error(f"Error fetching start_window: {e}")
+            await asyncio.sleep(10)
 
     async def get_start_window(self) -> int:
         while True:
@@ -2054,8 +2049,8 @@ class Comms(ChainManager):
             return None
 
     def weighted_random_sample_no_replacement(
-        self, candidates: list[str], weights: list[int], k: int
-    ) -> list[str]:
+        self, candidates: list[int], weights: list[int], k: int
+    ) -> list[int]:
         """
         Perform a weighted random sample (without replacement) of size k.
         candidates: list of items (uids).
