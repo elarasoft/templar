@@ -116,6 +116,9 @@ class AggregationServer:
         self.current_block = self.subtensor.block
         self.current_window = int(self.current_block / self.hparams.blocks_per_window)
 
+        self.next_peers = None
+        self.peers_update_window = -1
+
         self.iteration_counter = 0
 
     async def get_current_window(
