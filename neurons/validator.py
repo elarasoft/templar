@@ -276,7 +276,6 @@ class Validator:
         ).start()
         # Load Peers
         self.next_peers = None
-        self.peers_update_window = -1
         if self.config.peers:
             self.comms.peers = self.config.peers
 
@@ -296,6 +295,7 @@ class Validator:
             weights=self.weights,
             initial_selection=initial_selection,
         )
+        self.peers_update_window = self.sync_window + self.hparams.validator_offset
 
         # Only post start window if you are the highest stake validator
         if self.uid == self.metagraph.S.argmax().item():
@@ -1754,28 +1754,66 @@ class Validator:
     def select_next_peers(self) -> bool:
         # 1. Define candidate peers
         non_zero_weight_uids = torch.nonzero(self.weights).flatten().numpy()
+
+        # Find peers that are either inactive or have zero weight
+        peers_to_remove = [
+            peer
+            for peer in self.comms.peers
+            if peer not in self.comms.active_peers or peer not in non_zero_weight_uids
+        ]
+
+        # Find new candidates that have non-zero weight and aren't already peers
         candidates = list(set(non_zero_weight_uids) - set(self.comms.peers))
 
-        if len(candidates) < self.hparams.peers_to_replace:
+        # If no candidates and no peers to remove, skip update
+        if (
+            len(candidates) == 0
+            and len(peers_to_remove) == 0
+            or len(non_zero_weight_uids.tolist()) == 0
+        ):
             tplr.logger.info(
-                "Skipping update because there are insufficient candidate UIDs: "
-                f"{len(non_zero_weight_uids)} available and minimum is "
-                f"{self.hparams.peers_to_replace}. There are "
-                f"{len(non_zero_weight_uids)} UIDs with non-zero weight, "
-                f"{len(candidates)} of which are not already in the peer list (these "
-                f"are the candidates)."
+                "Skipping update because there are no changes needed: "
+                "all current peers have non-zero weights and are active."
             )
             return False
 
-        # 2. Pick ingoing and ingoing peers
+        # If we have peers to remove but not enough candidates, just remove them
+        if len(peers_to_remove) > 0 and len(candidates) < len(peers_to_remove):
+            # Remove peers with zero weight or inactive status
+            self.comms.peers = [
+                peer for peer in self.comms.peers if peer not in peers_to_remove
+            ]
+            tplr.logger.info(
+                f"Removed {len(peers_to_remove)} peers that had zero weight or were inactive. "
+                f"Current peers are {self.comms.peers}."
+            )
+            return True
+
+        # 2. Pick ingoing and outgoing peers
+        num_to_replace = min(self.hparams.peers_to_replace, len(candidates))
+
+        # If we don't have enough candidates, just use what we have
+        if num_to_replace == 0:
+            tplr.logger.info(
+                "Skipping peer replacement because there are insufficient candidate UIDs: "
+                f"{len(candidates)} available and minimum is 1."
+            )
+            return False
+
+        # Prioritize replacing peers with zero weight or inactive status
+        if peers_to_remove:
+            outgoing_peers = peers_to_remove[:num_to_replace]
+        else:
+            # If no problematic peers, randomly select peers to replace
+            outgoing_peers = np.random.choice(
+                a=self.comms.peers,
+                size=num_to_replace,
+                replace=False,
+            )
+
         ingoing_peers = np.random.choice(
             a=candidates,
-            size=self.hparams.peers_to_replace,
-            replace=False,
-        )
-        outgoing_peers = np.random.choice(
-            a=self.comms.peers,
-            size=self.hparams.peers_to_replace,
+            size=len(outgoing_peers),
             replace=False,
         )
 
@@ -1786,7 +1824,8 @@ class Validator:
         ]
 
         # Combine remaining peers with incoming peers
-        self.comms.peers = remaining_peers + ingoing_peers
+        self.comms.peers = remaining_peers + list(ingoing_peers)
+
         tplr.logger.info(
             f"Updated peer list by swapping {outgoing_peers} for "
             f"{ingoing_peers}. Current peers are {self.comms.peers}."
