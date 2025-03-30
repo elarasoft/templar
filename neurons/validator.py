@@ -284,6 +284,20 @@ class Validator:
         self.comms.update_peers_with_buckets()
         tplr.logger.info("Loaded commitments")
 
+        success = False
+        while not success:
+            success = self.select_initial_peers()
+            time.sleep(10)
+        initial_selection = True
+        self.last_peer_update_window = self.sync_window
+        await self.comms.post_peer_list(
+            first_effective_window=self.current_window
+            + self.hparams.peer_list_window_margin,
+            sync_window=self.sync_window,
+            weights=self.weights,
+            initial_selection=initial_selection,
+        )
+
         # Only post start window if you are the highest stake validator
         if self.uid == self.metagraph.S.argmax().item():
             # Post start_window to R2
@@ -349,6 +363,7 @@ class Validator:
         time_min = None
         self.last_peer_update_window = None
         self.last_peer_post_window = None
+
         while True:
             # 1. Wait for the validator window offset
             while self.sync_window >= (
@@ -390,14 +405,7 @@ class Validator:
                 tplr.logger.info(
                     f"Time to create and post a new peer list because {reason}"
                 )
-                if self.last_peer_update_window is None:
-                    success = False
-                    while not success:
-                        success = self.select_initial_peers()
-                        time.sleep(10)
-                    initial_selection = True
-                else:
-                    success = self.select_next_peers()
+                success = self.select_next_peers()
                 if success:
                     self.last_peer_update_window = self.sync_window
                     await self.comms.post_peer_list(
@@ -1713,7 +1721,7 @@ class Validator:
             uid_to_non_zero_incentive = {
                 uid: incentive
                 for uid, incentive in zip(self.metagraph.uids, self.metagraph.I)
-                if incentive > 0 and uid in self.comms.active_peers
+                if incentive > 0 and uid
             }
             top_incentive_peers = sorted(
                 uid_to_non_zero_incentive.items(),
@@ -1733,32 +1741,10 @@ class Validator:
                 )
                 return True
 
-            # 2. If needed, fill up with active peers
-            remaining_active_peers = list(
-                list(set(self.comms.active_peers) - set(top_incentive_peers))
-            )
-            top_incentive_and_active_peers = (
-                top_incentive_peers + remaining_active_peers
-            )[: self.hparams.max_topk_peers]
-
-            assert len(top_incentive_and_active_peers) <= self.hparams.max_topk_peers
-            if len(top_incentive_and_active_peers) >= self.hparams.minimum_peers:
-                self.comms.peers = top_incentive_and_active_peers
-                tplr.logger.info(
-                    f"Selected {len(self.comms.peers)} initial peers. "
-                    f"{len(top_incentive_peers)} with incentive: {top_incentive_peers} "
-                    f"and {len(remaining_active_peers)} without: "
-                    f"{remaining_active_peers}"
-                )
-                return True
-
             # 3. Give up
             tplr.logger.info(
                 f"Failed to find at least {self.hparams.minimum_peers} initial gather "
-                f"peers. Found only {len(top_incentive_and_active_peers)} active "
-                f"peers, of which {len(top_incentive_peers)} had incentive and "
-                f"{len(top_incentive_and_active_peers) - len(top_incentive_peers)} "
-                f"were incentiveless active peers."
+                f"peers. Found only {len(top_incentive_peers)} which had incentive."
             )
             return False
 
