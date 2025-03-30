@@ -681,16 +681,16 @@ class Miner:
                     "mean_momentum_norm": mean_momentum_norm,
                     "batch_duration": duration,
                     "total_tokens": int(self.total_tokens_processed),
-                    "active_peers": int(len(self.peers)),
+                    "active_peers": int(len(self.comms.peers)),
                     "effective_batch_size": int(
-                        len(self.peers) * self.hparams.batch_size
+                        len(self.comms.peers) * self.hparams.batch_size
                     ),
                     "learning_rate": self.scheduler.get_last_lr()[0],
                     "mean_grad_norm": mean_grad_norm,
                     "gather_success_rate": gather_success_rate,
                     "max_grad_norm": max(grad_norms) if grad_norms else 0,
                     "min_grad_norm": min(grad_norms) if grad_norms else 0,
-                    "gather_peers": json.dumps(self.peers),
+                    "gather_peers": json.dumps(self.comms.peers),
                     "skipped_peers": json.dumps(
                         gather_result.skipped_uids if gather_result else []
                     ),
