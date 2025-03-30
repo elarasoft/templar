@@ -291,9 +291,8 @@ class Validator:
         initial_selection = True
         self.last_peer_update_window = self.sync_window
         await self.comms.post_peer_list(
-            first_effective_window=self.current_window
-            + self.hparams.peer_list_window_margin,
-            sync_window=self.sync_window,
+            first_effective_window=self.sync_window + self.hparams.validator_offset,
+            sync_window=self.sync_window + self.hparams.validator_offset,
             weights=self.weights,
             initial_selection=initial_selection,
         )
