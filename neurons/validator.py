@@ -15,8 +15,6 @@
 # OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 # DEALINGS IN THE SOFTWARE.
 
-# type: ignore
-
 # Standard library
 import argparse
 import asyncio
@@ -31,7 +29,9 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from io import StringIO
 from time import perf_counter
+from typing import cast
 import bittensor as bt
+from bittensor.core.subtensor import ScaleObj
 import numpy as np
 from rich.console import Console
 from rich.table import Table
@@ -391,7 +391,10 @@ class Validator:
                     f"Time to create and post a new peer list because {reason}"
                 )
                 if self.last_peer_update_window is None:
-                    success = self.select_initial_peers()
+                    success = False
+                    while not success:
+                        success = self.select_initial_peers()
+                        time.sleep(10)
                     initial_selection = True
                 else:
                     success = self.select_next_peers()
@@ -502,7 +505,11 @@ class Validator:
                     response = self.subtensor.query_module(
                         "Timestamp", "Now", block=sync_block
                     )
-                    ts_value = response.value / 1000  # convert ms to seconds
+                    if response is None or not isinstance(response, ScaleObj):
+                        raise ValueError(f"Could not query timestamp for {sync_block}")
+                    ts_value = (
+                        cast(int, response.value) / 1000
+                    )  # convert milliseconds to seconds
                     break
                 except Exception as e:
                     tplr.logger.error(
@@ -1533,7 +1540,7 @@ class Validator:
             # Add successful peers information
             if gather_result is not None:
                 debug_dict["successful_peers"] = sorted(
-                    list(set(self.peers) - set(gather_result.skipped_uids))
+                    list(set(self.comms.peers) - set(gather_result.skipped_uids))
                 )
                 debug_dict["skipped_peers"] = sorted(list(gather_result.skipped_uids))
 
@@ -1571,7 +1578,7 @@ class Validator:
                 if gather_result
                 else 0,  # Success percentage
                 "validator/timing/window_total": tplr.T() - window_start,
-                "validator/timing/peer_update": tplr.T() - peer_start,
+                "validator/timing/peer_update": tplr.T() - self.peer_start,
                 "validator/timing/gather": tplr.T() - gather_start,
                 "validator/timing/evaluation": tplr.T() - eval_start,
                 "validator/timing/model_update": tplr.T() - update_start,
@@ -1603,11 +1610,11 @@ class Validator:
                     "active_miners_count": int(len(self.valid_score_indices)),
                     "gather_success_rate": gather_success_rate,
                     "window_total_time": float(tplr.T() - window_start),
-                    "peer_update_time": float(tplr.T() - peer_start),
+                    "peer_update_time": float(tplr.T() - self.peer_start),
                     "gather_time": float(tplr.T() - gather_start),
                     "evaluation_time": float(tplr.T() - eval_start),
                     "model_update_time": float(tplr.T() - update_start),
-                    "total_peers": int(len(self.peers)),
+                    "total_peers": int(len(self.comms.peers)),
                     "total_skipped": int(total_skipped),
                 },
             )
@@ -1709,13 +1716,13 @@ class Validator:
                 if incentive > 0 and uid in self.comms.active_peers
             }
             top_incentive_peers = sorted(
-                uid_to_non_zero_incentive,
-                key=uid_to_non_zero_incentive.get,
+                uid_to_non_zero_incentive.items(),
+                key=lambda x: x[1],
                 reverse=True,
             )[: self.hparams.max_topk_peers]
 
-            # Convert to list to ensure it's not a dict_keys object
-            top_incentive_peers = np.array(top_incentive_peers, dtype=np.int64)
+            # Extract just the UIDs (the first element of each tuple)
+            top_incentive_peers = [int(uid) for uid, _ in top_incentive_peers]
 
             assert len(top_incentive_peers) <= self.hparams.max_topk_peers
             if len(top_incentive_peers) >= self.hparams.minimum_peers:
@@ -1727,11 +1734,11 @@ class Validator:
                 return True
 
             # 2. If needed, fill up with active peers
-            remaining_active_peers = np.array(
+            remaining_active_peers = list(
                 list(set(self.comms.active_peers) - set(top_incentive_peers))
             )
-            top_incentive_and_active_peers = np.concatenate(
-                [top_incentive_peers, remaining_active_peers]
+            top_incentive_and_active_peers = (
+                top_incentive_peers + remaining_active_peers
             )[: self.hparams.max_topk_peers]
 
             assert len(top_incentive_and_active_peers) <= self.hparams.max_topk_peers
@@ -1788,12 +1795,13 @@ class Validator:
         )
 
         # 3. Replace
-        self.comms.peers = np.concatenate(
-            [
-                self.comms.peers[~np.isin(self.comms.peers, outgoing_peers)],
-                ingoing_peers,
-            ]
-        )
+        # Filter out outgoing peers
+        remaining_peers = [
+            peer for peer in self.comms.peers if peer not in outgoing_peers
+        ]
+
+        # Combine remaining peers with incoming peers
+        self.comms.peers = remaining_peers + ingoing_peers
         tplr.logger.info(
             f"Updated peer list by swapping {outgoing_peers} for "
             f"{ingoing_peers}. Current peers are {self.comms.peers}."
